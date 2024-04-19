@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/csv"
-	"fmt"
+	// "fmt"
 	"log"
 	"os"
 	"time"
@@ -42,7 +42,6 @@ func main() {
 	for _, record := range records {
 		url := "https://" + record[1] + "/"
 		c.Visit(url)
-		fmt.Println(url)
 	}
 	c.Wait()
 }
