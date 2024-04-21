@@ -5,6 +5,7 @@ go 1.22.0
 require (
 	github.com/gocolly/colly/v2 v2.1.0
 	github.com/jackc/pgx/v4 v4.18.3
+	github.com/joho/godotenv v1.5.1
 )
 
 require (
