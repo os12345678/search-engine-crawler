@@ -5,6 +5,7 @@ go 1.22.0
 require (
 	github.com/Masterminds/squirrel v1.5.4
 	github.com/gocolly/colly/v2 v2.1.0
+	github.com/google/uuid v1.6.0
 	github.com/oklog/ulid v1.3.1
 )
 

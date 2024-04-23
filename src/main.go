@@ -3,11 +3,13 @@ package main
 import (
 	"crypto/rand"
 	"fmt"
+	"log"
 	"time"
 
 	"os21345678/search-engine-crawler/src/util"
 
 	"github.com/gocolly/colly/v2"
+	"github.com/google/uuid"
 	"github.com/oklog/ulid"
 )
 
@@ -79,15 +81,15 @@ func (c *Crawler) crawl(url string) {
 		text := e.Text
 		words := util.Lemmatize(text)
 
-		// Construct data objects
-		website := &Website{
-			ID:          ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String(),
-			Title:       title,
-			Description: desc,
-			URL:         url,
-			WordCount:   len(words),
-			Rank:        c.rank,
-		}
+		// // Construct data objects
+		// website := &Website{
+		// 	ID:          ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String(),
+		// 	Title:       title,
+		// 	Description: desc,
+		// 	URL:         url,
+		// 	WordCount:   len(words),
+		// 	Rank:        c.rank,
+		// }
 
 		keywordIDs := make(map[string]string)
 		wordIndices := make(map[string]int)
@@ -105,5 +107,71 @@ func (c *Crawler) crawl(url string) {
 			wordPositions = append(wordPositions, position)
 			position++
 		}
+		websiteId := uuid.New().String()
+
+		websiteIdsBatch := make([]string, len(words))
+		ranksBatch := make([]string, len(words))
+		wordIndicesBatch := make([]int, len(words))
+
+		// Populate batches - more optimized than map
+		for i := range websiteIdsBatch {
+			websiteIdsBatch[i] = websiteId
+			ranksBatch[i] = fmt.Sprintf("%d", c.rank)
+			wordIndicesBatch[i] = wordIndices[words[i]] // Assuming words[i] is the key
+		}
+
+		// Database Insertion - websites
+		err := c.db.Insert(&Website{
+			ID: 		 websiteId,
+			Title:       title,
+			Description: desc,
+			URL:         url,
+			WordCount:   len(words),
+			Rank:        c.rank,
+		})
+		if err != nil {
+			fmt.Printf("[WARNING]: Failed to index: %s\n\n%v\n", url, err)
+			return
+		}
+
+		// Database Insertion - Keywords (with updates)
+		keywords := make([]*Keyword, 0, len(keywordIDs))
+		for word, id := range keywordIDs {
+			keywords = append(keywords, &Keyword{
+				ID:                      id,
+				Word:                    word,
+				DocumentsContainingWord: 1, // fix
+			})
+		}
+
+		err = c.db.InsertManyOrUpdate(keywords)
+		if err != nil {
+			log.Printf("[WARNING]: Error updating keywords: %v\n", err)
+		}
+
+		// Construct word IDs
+		updatedWordIds := make([]string, 0, len(keywords))
+		for _, keyword := range keywords {
+			updatedWordIds = append(updatedWordIds, keyword.ID)
+		}
+
+		// Database Insertion - website_keywords
+		websiteKeywords := make([]*WebsiteKeyword, 0, len(updatedWordIds)) 
+		for i := range updatedWordIds {
+			websiteKeywords = append(websiteKeywords, &WebsiteKeyword{
+				KeywordID:   updatedWordIds[i], 
+				WebsiteID:   websiteIdsBatch[i],
+				Occurrences: wordIndicesBatch[i],
+				Position:    wordPositions[i],
+			})
+		}
+
+		err = c.db.InsertMany(websiteKeywords)
+		if err != nil {
+			log.Printf("[WARNING]: Error inserting website keywords: %v\n", err)
+		}
+		
+		fmt.Println("Successfully crawled:", url)
 	})
-}
+
+	}
