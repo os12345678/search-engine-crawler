@@ -1,198 +1,109 @@
 package main
 
 import (
-	"context"
-	"encoding/csv"
-	"encoding/json"
+	"crypto/rand"
 	"fmt"
-	"log"
-	"os"
-	"regexp"
-	"strings"
 	"time"
-	"unicode"
+
+	"os21345678/search-engine-crawler/src/util"
 
 	"github.com/gocolly/colly/v2"
-	"github.com/gofrs/uuid"
-	"github.com/jackc/pgx/v4"
+	"github.com/oklog/ulid"
 )
 
-var (
-	user = os.Getenv("DB_USER")
-	host = os.Getenv("DB_HOST")
-	dbname = os.Getenv("DB_NAME")
-	password = os.Getenv("DB_PASSWORD")
-	port = os.Getenv("DB_PORT")
-)
-
-var lemmatisedMap map[string]string
-
-func init() {
-	data, err := os.ReadFile("lemmatised.json")
-	if err != nil {
-		log.Fatal("Failed to read lemmatised.json: ", err)
-	}
-	err = json.Unmarshal(data, &lemmatisedMap)
-	if err != nil {
-		log.Fatal("Failed to unmarshal lemmatised.json: ", err)
-	}
+type Website struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	URL         string `json:"url"`
+	WordCount   int    `json:"wordCount"`
+	Rank        int    `json:"rank"`
 }
 
-func ReadCsv(filename string) ([][]string, error) {
-	file, err := os.Open(filename)
-	if err != nil {
-		return [][]string{}, err
-	}
-	defer file.Close()
-
-	return csv.NewReader(file).ReadAll()
+type Keyword struct {
+	ID                      string `json:"id"`
+	Word                    string `json:"word"`
+	DocumentsContainingWord int    `json:"documentsContainingWord"`
 }
 
-func connectDB() (*pgx.Conn, error) {
-	conn, err := pgx.Connect(context.Background(), fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", user, password, host, port, dbname))
-	if err != nil {
-		return nil, err
-	}
-	return conn, nil
+type WebsiteKeyword struct {
+	KeywordID   string `json:"keywordId"`
+	WebsiteID   string `json:"websiteId"`
+	Occurrences int    `json:"occurrences"`
+	Position    int    `json:"position"`
 }
 
-func extractMetaDescription(e *colly.HTMLElement) string {
-	return e.ChildAttr("meta[name=description]", "content")
+type Database interface {
+	Insert(website *Website) error
+	InsertManyOrUpdate(keywords []*Keyword) error
+	InsertMany(websiteKeywords []*WebsiteKeyword) error
+}
+type Crawler struct {
+	collector *colly.Collector
+	rank      int
+	db        Database
 }
 
-func tokenize(text string) []string {
-    text = strings.ToLower(text)
+func NewCrawler(rank int, db Database) *Crawler {
+	c := colly.NewCollector()
+	c.IgnoreRobotsTxt=false
 
-    re := regexp.MustCompile(`[\W_]+`) // Matches non-word characters and underscores
-    tokens := re.Split(text, -1)
-
-    var filteredTokens []string
-    for _, token := range tokens {
-        if !isEmptyOrSpace(token) { 
-            filteredTokens = append(filteredTokens, token)
-        }
-    }
-    return filteredTokens
-}
-
-func isEmptyOrSpace(str string) bool {
-    for _, r := range str {
-        if !unicode.IsSpace(r) {
-            return false
-        }
-    }
-    return true
-}
-
-func extractKeywords(text string) map[string]int {
-	words := tokenize(text)
-	wordCounts := make(map[string]int)
-	for _, word := range words {
-		if lemma, found := lemmatisedMap[word]; found {
-            wordCounts[lemma]++
-		}
-	}
-	return wordCounts
-}
-
-func lemmatize(keywords map[string]int) []string {
-	return []string{}
-}
-
-func storeData(db *pgx.Conn, title, description, text, url string, keywords []string) error {
-    tx, err := db.Begin(context.Background()) // Start a transaction
-    if err != nil {
-        return err
-    }
-    defer tx.Rollback(context.Background())  // Rollback if an error occurs
-
-    // 1. Insert into 'websites' table
-    var websiteID uuid.UUID
-    err = tx.QueryRow(context.Background(), `
-        INSERT INTO websites (title, description, url, word_count, rank) 
-        VALUES ($1, $2, $3, $4, $5) 
-        RETURNING id`, 
-        title, description, url, calculateWordCount(text), calculateRank(url),
-    ).Scan(&websiteID)
-    if err != nil {
-        return err
-    }
-
-    // 2. Insert into 'keywords' and 'website_keywords'
-    for _, word := range keywords {
-        // Upsert logic for keywords
-        var keywordID uuid.UUID
-        err = tx.QueryRow(context.Background(), `
-                INSERT INTO keywords (word, documents_containing_word) 
-                VALUES ($1, 1)  
-                ON CONFLICT (word) DO UPDATE SET documents_containing_word = keywords.documents_containing_word + 1
-                RETURNING id`, word).Scan(&keywordID)
-        if err != nil {
-            return err
-        }
-
-        // Insert into website_keywords
-        _, err = tx.Exec(context.Background(), `
-                INSERT INTO website_keywords (keyword_id, website_id, occurrences, position)
-                VALUES ($1, $2, $3, $4)`, 
-                keywordID, websiteID, countKeywordOccurrences(text, word), calculatePosition(text, word),
-        )
-        if err != nil {
-            return err
-        }
-    }
-
-    err = tx.Commit(context.Background()) // Commit transaction
-    return err
-}
-
-
-
-
-func main() {
-	csvData, err := ReadCsv("top-1m.csv")
-	if err != nil {
-		log.Fatal("Failed to read CSV: ", err)
-	}
-
-	db, err := connectDB()
-	if err != nil {
-		log.Fatal("Failed to connect to database: ", err)
-	}
-	defer db.Close(context.Background())
-
-	c := colly.NewCollector(colly.Async(true))
-	c.IgnoreRobotsTxt = false
-	c.Limit(&colly.LimitRule{
-		DomainGlob:   "*",
-		Parallelism:  10,
-		RandomDelay:  1 * time.Second,
-	})
-
-	c.OnHTML("body", func(e *colly.HTMLElement) {
-		title := e.ChildText("title")
-		description := extractMetaDescription(e)
-		url := e.Request.URL.String()
-		text := e.Text
-
-		// Keyword extraction and lemmatization
-		keywords := extractKeywords(text)
-		lemmatizedKeywords := lemmatize(keywords)
-
-		// Database operations
-		err := storeData(db, title, description, text, url, lemmatizedKeywords)
-		if err != nil {
-			log.Println("Error storing:", url, err)
-		}
-	})
-
+	// Disallow crawling of unwanted resource types
 	c.OnRequest(func(r *colly.Request) {
-	fmt.Println("Visiting:", r.URL)
+		switch r.Ctx.Get("resource_type") {
+		case "image", "media", "stylesheet", "font", "script":
+			r.Abort()
+		}
 	})
 
-	// Start crawling from the URLs in the CSV
-	for _, row := range csvData {
-		c.Visit(row[1]) 
+	return &Crawler{
+		collector: c,
+		rank:      rank,
+		db:        db,
 	}
-	c.Wait()
+}
+
+func (c *Crawler) crawl(url string) {
+	fmt.Println("Crawling:", url)
+
+	c.collector.OnHTML("html", func(e *colly.HTMLElement) {
+		lang := e.Attr("lang")
+		if lang != "en" && lang != "en-gb" {
+			return // Only index English websites 
+		}
+
+		title := e.ChildText("title")
+		desc := e.ChildAttr("meta[name=description]", "content")
+
+		// Extract and lemmatize words (you'll need lemmatization logic)
+		text := e.Text
+		words := util.Lemmatize(text)
+
+		// Construct data objects
+		website := &Website{
+			ID:          ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String(),
+			Title:       title,
+			Description: desc,
+			URL:         url,
+			WordCount:   len(words),
+			Rank:        c.rank,
+		}
+
+		keywordIDs := make(map[string]string)
+		wordIndices := make(map[string]int)
+		wordPositions := []int{}
+		wordIDs := []string{}
+
+		position := 1
+		for _, word := range words {
+			wordIndices[word]++
+
+			if _, ok := keywordIDs[word]; !ok {
+				keywordIDs[word] = ulid.MustNew(ulid.Timestamp(time.Now()), rand.Reader).String()
+			}
+			wordIDs = append(wordIDs, keywordIDs[word])
+			wordPositions = append(wordPositions, position)
+			position++
+		}
+	})
 }
