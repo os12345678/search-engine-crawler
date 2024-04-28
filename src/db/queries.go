@@ -1,90 +1,100 @@
-package database
+package db
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
-	"strings"
 
-	"github.com/Masterminds/squirrel"
+	sq "github.com/Masterminds/squirrel"
+	"github.com/jackc/pgx/v4/pgxpool"
 )
 
-type QueryBuilder struct {
-	builder squirrel.StatementBuilderType
-	db      *sql.DB // Add this field
+// Database connection pool
+var pool *pgxpool.Pool 
+
+func init() {
+    var err error
+    pool, err = pgxpool.Connect(context.Background(), createSQLPool())
+    if err != nil {
+        fmt.Println("Error connecting to database:", err)
+    }
 }
 
+// 1. insert 
+func Insert(table string, columns []string, values []any) error {
+    builder := sq.Insert(table).Columns(columns...)
 
-func NewQueryBuilder(db *sql.DB) *QueryBuilder {
-	return &QueryBuilder{
-		builder: squirrel.StatementBuilder.PlaceholderFormat(squirrel.Dollar),
-		db:      db,
-	}
+    for _, val := range values {
+        builder = builder.Values(val)
+    }
+
+    query, args, err := builder.ToSql()
+    if err != nil {
+        return err
+    }
+
+    _, err = pool.Exec(context.Background(), query, args...)
+    return err 
 }
 
+// // 2. insertManyOrUpdate
+// func insertManyOrUpdate(
+//     table string,
+//     columns []string,
+//     values [][]any,  
+//     conflictColumns []string,
+//     conflictAction string,
+//     returns []string,
+// ) (*pgx.Rows, error) {
 
-// Insert (single row)
-func (qb *QueryBuilder) Insert(table string, data map[string]interface{}) error {
-	query := qb.builder.Insert(table).SetMap(data)
+//     builder := sq.Insert(table).Columns(columns...)
 
-	sqlStr, args, err := query.ToSql() 
-	if err != nil {
-		return err
-	}
+//     // Construct VALUES with unnest, assuming types align with values
+//     for _, row := range values {
+//         builder = builder.Values(row...)
+//     }
 
-	_, err = qb.db.Exec(sqlStr, args...)
-	return err
-}
+//     builder = builder.Suffix(fmt.Sprintf(
+//           "ON CONFLICT (%s) DO UPDATE SET %s",
+//           strings.Join(conflictColumns, ","),
+//           conflictAction,
+//     ))
 
-// InsertManyOrUpdate (upsert)
-func (qb *QueryBuilder) InsertManyOrUpdate(
-	table string,
-	columns []string,
-	values [][]interface{},
-	conflictColumns []string,
-	conflictAction string,
-	returns []string,
-) (*sql.Rows, error) {
+// 	if len(returns) != 0 {
+// 		builder = builder.Suffix(fmt.Sprintf("RETURNING %s", strings.Join(returns, ",")))
+// 	}
 
-	baseQuery := qb.builder.Insert(table).Columns(columns...)
+// 	query, args, err := builder.ToSql()
+// 	if err != nil {
+// 		return nil, err
+// 	}
 
-	// Squirrel makes upsert construction more readable
-	if len(conflictColumns) > 0 { 
-		baseQuery = baseQuery.Suffix(fmt.Sprintf("ON CONFLICT (%s) DO UPDATE SET %s", 
-			strings.Join(conflictColumns, ","), conflictAction)) 
-	}
+// 	x, err := pool.Query(context.Background(), query, args...) 
 
-	query := baseQuery.Options("VALUES (?)", values) // Use VALUES for bulk rows
+// 	return x, err
+// }
 
-	if len(returns) > 0 {
-		query = query.Suffix(fmt.Sprintf("RETURNING %s", strings.Join(returns, ",")))
-	}
-
-	sqlStr, args, err := query.ToSql() 
-	if err != nil { 
-		return nil, err 
-	} 
-
-	return qb.db.Query(sqlStr, args...) 
-}
-
-// InsertMany (bulk insert)
-func (qb *QueryBuilder) InsertMany(
-	table string,
-	columns []string,
-	values [][]interface{},
+// 3. insertMany
+func InsertMany(
+    table string,
+    columns []string,
+    values [][]any, 
 ) error {
-	query := qb.builder.Insert(table).Columns(columns...).Options("VALUES (?)", values) 
+    builder := sq.Insert(table).Columns(columns...)
 
-	sqlStr, args, err := query.ToSql() 
-	if err != nil {
-		return err 
-	}
+    // Construct VALUES with unnest
+    for _, row := range values {
+        builder = builder.Values(row...)
+    }
 
-	_, err = qb.db.Exec(sqlStr, args...)
-	return err
+    query, args, err := builder.ToSql()
+    if err != nil {
+        return err
+    }
+
+    _, err = pool.Exec(context.Background(), query, args...)
+    return err
 }
 
-// Query (for general queries - Squirrel is less useful here if simply executing)
-func (qb *QueryBuilder) Query(query string, data ...interface{}) (*sql.Rows, error) {
-	return qb.db.Query(query, data...)
-}
+// func query(query string, data ...any) (*pgx.Rows, error) {
+//     return pool.Query(context.Background(), query, data...)
+// }

@@ -21,7 +21,7 @@ func loadLemmatizedWords() map[string]string {
 	return LemmatizedWords
 }
 
-func Lemmatize(text string) []string {
+func lemmatize(text string) []string {
 	
 	lemmatizedWords := loadLemmatizedWords()
     // Pre-allocate a reasonable capacity based on an estimated average word count
